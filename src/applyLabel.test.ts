@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import { describe, expect, it, vi } from "vitest";
 
 import { applyLabel } from "./applyLabel.ts";
-import { InvalidRecordError } from "./downloadRecord.ts";
+import { InvalidRecordError } from "./InvalidRecordError.ts";
 import {
 	createContext,
 	createMockOctokit,
@@ -15,19 +15,22 @@ const headSha = "a".repeat(40);
 const otherSha = "b".repeat(40);
 const pullRequestUrl =
 	"https://api.github.com/repos/test-owner/test-repo/pulls/1";
-const reviewer = { id: 10 };
-const recordedReviewEvent = {
-	event: "reviewed",
+const reviewer = { id: 10, login: "reviewer" };
+const submittedAt = "2026-10-06T12:00:00Z";
+const recordedReview = {
 	id: 2,
-	state: "changes_requested",
+	state: "CHANGES_REQUESTED",
+	submitted_at: submittedAt,
 	user: reviewer,
 };
 
 interface Scenario {
+	events?: Record<string, unknown>[];
+	permission?: Error | string;
 	pullRequest?: Error | Record<string, unknown>;
 	record?: Error | Record<string, unknown>;
 	review?: Error | Record<string, unknown>;
-	timeline?: Record<string, unknown>[];
+	reviews?: Record<string, unknown>[];
 	workflowRun?: Record<string, unknown>;
 }
 
@@ -43,9 +46,11 @@ function createWorkflowRun(overrides: Record<string, unknown> = {}) {
 
 async function runApplyLabel(scenario: Scenario = {}) {
 	const {
+		events = [],
+		permission = "write",
 		pullRequest = {},
 		review = {},
-		timeline = [recordedReviewEvent],
+		reviews = [recordedReview],
 	} = scenario;
 	const record =
 		"record" in scenario ? scenario.record : { pullRequest: 1, review: 2 };
@@ -74,18 +79,25 @@ async function runApplyLabel(scenario: Scenario = {}) {
 	} else {
 		mocks.getReview.mockResolvedValue({
 			data: {
-				author_association: "OWNER",
+				...recordedReview,
 				commit_id: headSha,
-				id: 2,
 				pull_request_url: pullRequestUrl,
-				state: "CHANGES_REQUESTED",
-				user: reviewer,
 				...review,
 			},
 		});
 	}
 
-	mocks.paginate.mockResolvedValue(timeline);
+	if (permission instanceof Error) {
+		mocks.getCollaboratorPermissionLevel.mockRejectedValue(permission);
+	} else {
+		mocks.getCollaboratorPermissionLevel.mockResolvedValue({
+			data: { permission },
+		});
+	}
+
+	mocks.paginate.mockImplementation((endpoint) =>
+		Promise.resolve(endpoint === mocks.listReviews ? reviews : events),
+	);
 
 	await applyLabel({
 		context: createContext("workflow_run", { workflow_run: workflowRun }),
@@ -221,28 +233,13 @@ describe(applyLabel, () => {
 	});
 
 	it.each([
-		"CONTRIBUTOR",
-		"FIRST_TIME_CONTRIBUTOR",
-		"FIRST_TIMER",
-		"MANNEQUIN",
-		"NONE",
-	])(
-		"does nothing when the reviewer's association is %s",
-		async (author_association) => {
-			const { mocks } = await runApplyLabel({ review: { author_association } });
+		["reviewer", { user: null }],
+		["submission time", { submitted_at: null }],
+	])("does nothing when the review has no %s", async (_, review) => {
+		const { mocks } = await runApplyLabel({ review });
 
-			expect(mocks.addLabels).not.toHaveBeenCalled();
-		},
-	);
-
-	it.each(["COLLABORATOR", "MEMBER", "OWNER"])(
-		"adds the label when the reviewer's association is %s",
-		async (author_association) => {
-			const { mocks } = await runApplyLabel({ review: { author_association } });
-
-			expect(mocks.addLabels).toHaveBeenCalled();
-		},
-	);
+		expect(mocks.addLabels).not.toHaveBeenCalled();
+	});
 
 	it("does nothing when neither the review nor the pull request is on the workflow run's commit", async () => {
 		const { mocks } = await runApplyLabel({
@@ -276,10 +273,59 @@ describe(applyLabel, () => {
 		expect(mocks.addLabels).toHaveBeenCalled();
 	});
 
-	it("reads the pull request's timeline", async () => {
+	it("checks the reviewer's permission", async () => {
 		const { mocks } = await runApplyLabel();
 
-		expect(mocks.paginate).toHaveBeenCalledWith(mocks.listEventsForTimeline, {
+		expect(mocks.getCollaboratorPermissionLevel).toHaveBeenCalledWith({
+			owner: "test-owner",
+			repo: "test-repo",
+			username: "reviewer",
+		});
+	});
+
+	it.each(["none", "read", "triage"])(
+		"does nothing when the reviewer's permission is %s",
+		async (permission) => {
+			const { mocks } = await runApplyLabel({ permission });
+
+			expect(mocks.paginate).not.toHaveBeenCalled();
+			expect(mocks.addLabels).not.toHaveBeenCalled();
+		},
+	);
+
+	it("does nothing when the reviewer is not a collaborator", async () => {
+		const { mocks } = await runApplyLabel({
+			permission: createRequestError(404),
+		});
+
+		expect(mocks.addLabels).not.toHaveBeenCalled();
+	});
+
+	it("rethrows non-404 errors from checking the reviewer's permission", async () => {
+		await expect(
+			runApplyLabel({ permission: createRequestError(403) }),
+		).rejects.toThrow("HTTP 403");
+	});
+
+	it.each(["admin", "write"])(
+		"adds the label when the reviewer's permission is %s",
+		async (permission) => {
+			const { mocks } = await runApplyLabel({ permission });
+
+			expect(mocks.addLabels).toHaveBeenCalled();
+		},
+	);
+
+	it("reads the pull request's reviews and events", async () => {
+		const { mocks } = await runApplyLabel();
+
+		expect(mocks.paginate).toHaveBeenCalledWith(mocks.listReviews, {
+			owner: "test-owner",
+			per_page: 100,
+			pull_number: 1,
+			repo: "test-repo",
+		});
+		expect(mocks.paginate).toHaveBeenCalledWith(mocks.listEvents, {
 			issue_number: 1,
 			owner: "test-owner",
 			per_page: 100,
@@ -287,29 +333,18 @@ describe(applyLabel, () => {
 		});
 	});
 
-	it("does nothing when the review is not in the timeline", async () => {
-		const { mocks } = await runApplyLabel({
-			timeline: [{ ...recordedReviewEvent, id: 3 }],
-		});
-
-		expect(mocks.addLabels).not.toHaveBeenCalled();
-	});
-
-	it("does nothing when a review was requested after the review", async () => {
-		const { mocks } = await runApplyLabel({
-			timeline: [recordedReviewEvent, { event: "review_requested" }],
-		});
-
-		expect(mocks.addLabels).not.toHaveBeenCalled();
-	});
-
-	it.each(["approved", "changes_requested", "dismissed"])(
+	it.each(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"])(
 		"does nothing when the reviewer submitted a newer %s review",
 		async (state) => {
 			const { mocks } = await runApplyLabel({
-				timeline: [
-					recordedReviewEvent,
-					{ event: "reviewed", id: 3, state, user: reviewer },
+				reviews: [
+					recordedReview,
+					{
+						id: 3,
+						state,
+						submitted_at: "2026-10-06T12:00:01Z",
+						user: reviewer,
+					},
 				],
 			});
 
@@ -319,9 +354,30 @@ describe(applyLabel, () => {
 
 	it("adds the label when the reviewer only commented afterwards", async () => {
 		const { mocks } = await runApplyLabel({
-			timeline: [
-				recordedReviewEvent,
-				{ event: "reviewed", id: 3, state: "commented", user: reviewer },
+			reviews: [
+				recordedReview,
+				{
+					id: 3,
+					state: "COMMENTED",
+					submitted_at: "2026-10-06T12:00:01Z",
+					user: reviewer,
+				},
+			],
+		});
+
+		expect(mocks.addLabels).toHaveBeenCalled();
+	});
+
+	it("adds the label when the reviewer's other decisions are older", async () => {
+		const { mocks } = await runApplyLabel({
+			reviews: [
+				{
+					id: 1,
+					state: "APPROVED",
+					submitted_at: "2026-10-06T11:59:59Z",
+					user: reviewer,
+				},
+				recordedReview,
 			],
 		});
 
@@ -330,29 +386,73 @@ describe(applyLabel, () => {
 
 	it("adds the label when another reviewer reviewed afterwards", async () => {
 		const { mocks } = await runApplyLabel({
-			timeline: [
-				recordedReviewEvent,
-				{ event: "reviewed", id: 3, state: "approved", user: { id: 11 } },
+			reviews: [
+				recordedReview,
+				{
+					id: 3,
+					state: "APPROVED",
+					submitted_at: "2026-10-06T12:00:01Z",
+					user: { id: 11, login: "other" },
+				},
+				{ id: 4, state: "APPROVED", submitted_at: null, user: reviewer },
+				{ id: 5, state: "APPROVED", submitted_at: "2026-10-06T12:00:02Z" },
 			],
 		});
 
 		expect(mocks.addLabels).toHaveBeenCalled();
 	});
 
-	it("adds the label when a review was requested before the review", async () => {
+	it.each([
+		["at the same time as", submittedAt],
+		["after", "2026-10-06T12:00:01Z"],
+	])(
+		"does nothing when a review was requested %s the review",
+		async (_, created_at) => {
+			const { mocks } = await runApplyLabel({
+				events: [{ created_at, event: "review_requested" }],
+			});
+
+			expect(mocks.addLabels).not.toHaveBeenCalled();
+		},
+	);
+
+	it("does nothing when the label was removed after the review", async () => {
 		const { mocks } = await runApplyLabel({
-			timeline: [
-				{ event: "review_requested" },
-				recordedReviewEvent,
-				{ event: "commented" },
-				{ event: "labeled" },
+			events: [
+				{
+					created_at: "2026-10-06T12:00:01Z",
+					event: "unlabeled",
+					label: { name: "status: waiting for author" },
+				},
+			],
+		});
+
+		expect(mocks.addLabels).not.toHaveBeenCalled();
+	});
+
+	it("adds the label when only older or unrelated events exist", async () => {
+		const { mocks } = await runApplyLabel({
+			events: [
+				{ created_at: "2026-10-06T11:59:59Z", event: "review_requested" },
+				{
+					created_at: "2026-10-06T11:59:59Z",
+					event: "unlabeled",
+					label: { name: "status: waiting for author" },
+				},
+				{
+					created_at: "2026-10-06T12:00:01Z",
+					event: "unlabeled",
+					label: { name: "other" },
+				},
+				{ created_at: "2026-10-06T12:00:01Z", event: "labeled" },
+				{ created_at: "2026-10-06T12:00:01Z", event: "review_request_removed" },
 			],
 		});
 
 		expect(mocks.addLabels).toHaveBeenCalled();
 	});
 
-	it("adds the label when a maintainer requested changes on the workflow run's commit", async () => {
+	it("adds the label when a reviewer with write access requested changes on the workflow run's commit", async () => {
 		const { mocks } = await runApplyLabel();
 
 		expect(mocks.getPullRequest).toHaveBeenCalledWith({

@@ -3,10 +3,16 @@ import * as core from "@actions/core";
 import type { ReviewRecord } from "./record.ts";
 import type { ActionContext, Octokit } from "./types.ts";
 
-import { InvalidRecordError } from "./downloadRecord.ts";
+import { InvalidRecordError } from "./InvalidRecordError.ts";
 import { isNotFound } from "./isNotFound.ts";
 
-const maintainerAssociations = new Set(["COLLABORATOR", "MEMBER", "OWNER"]);
+const maintainerPermissions = new Set(["admin", "write"]);
+
+const newerReviewStates = new Set([
+	"APPROVED",
+	"CHANGES_REQUESTED",
+	"DISMISSED",
+]);
 
 export interface ApplyLabelSettings {
 	context: ActionContext;
@@ -15,18 +21,11 @@ export interface ApplyLabelSettings {
 	octokit: Octokit;
 }
 
-interface TimelineEvent {
-	event?: string;
-	id?: number;
-	state?: string;
-	user?: null | { id: number };
-}
-
 /**
  * Runs in the privileged workflow_run workflow.
  * Treats the record as untrusted: the label is only added if GitHub's API confirms
- * a maintainer's review requesting changes on that PR, for the commit the recording
- * run ran on, with no newer review request or decision from that reviewer.
+ * a review requesting changes on that PR from someone with write access, for the
+ * commit the recording run ran on, with nothing newer that would undo it.
  */
 export async function applyLabel({
 	context,
@@ -118,9 +117,9 @@ export async function applyLabel({
 		return;
 	}
 
-	if (!maintainerAssociations.has(review.author_association)) {
+	if (!review.user || !review.submitted_at) {
 		core.info(
-			`Review ${record.review} on PR #${record.pullRequest} is from a ${review.author_association} reviewer, not a collaborator, member, or owner.`,
+			`Review ${record.review} on PR #${record.pullRequest} has no reviewer or submission time.`,
 		);
 		return;
 	}
@@ -135,38 +134,63 @@ export async function applyLabel({
 		return;
 	}
 
-	const timeline: TimelineEvent[] = await octokit.paginate(
-		octokit.rest.issues.listEventsForTimeline,
-		{
+	const reviewer = review.user;
+	const permission = await getOrUndefined(() =>
+		octokit.rest.repos.getCollaboratorPermissionLevel({
 			...context.repo,
-			issue_number: record.pullRequest,
-			per_page: 100,
-		},
-	);
-	const reviewIndex = timeline.findIndex(
-		(event) => event.event === "reviewed" && event.id === review.id,
+			username: reviewer.login,
+		}),
 	);
 
-	if (reviewIndex === -1) {
-		core.warning(
-			`Review ${record.review} is not in PR #${record.pullRequest}'s timeline.`,
+	if (!maintainerPermissions.has(permission?.permission ?? "none")) {
+		core.info(
+			`Review ${record.review} on PR #${record.pullRequest} is from a reviewer without write access.`,
 		);
 		return;
 	}
 
-	const newerEvent = timeline
-		.slice(reviewIndex + 1)
-		.find(
-			(event) =>
-				event.event === "review_requested" ||
-				(event.event === "reviewed" &&
-					event.user?.id === review.user?.id &&
-					event.state?.toLowerCase() !== "commented"),
+	const submittedAt = Date.parse(review.submitted_at);
+	const isSinceReview = (time: null | string | undefined) =>
+		!!time && Date.parse(time) >= submittedAt;
+
+	const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+		...context.repo,
+		per_page: 100,
+		pull_number: record.pullRequest,
+	});
+
+	if (
+		reviews.some(
+			(other) =>
+				other.id !== review.id &&
+				other.user?.id === reviewer.id &&
+				newerReviewStates.has(other.state) &&
+				isSinceReview(other.submitted_at),
+		)
+	) {
+		core.info(
+			`The reviewer submitted a newer review on PR #${record.pullRequest} than review ${record.review}, so it won't be labeled.`,
 		);
+		return;
+	}
+
+	const events = await octokit.paginate(octokit.rest.issues.listEvents, {
+		...context.repo,
+		issue_number: record.pullRequest,
+		per_page: 100,
+	});
+	const newerEvent = events.find(
+		(event) =>
+			isSinceReview(event.created_at) &&
+			(event.event === "review_requested" ||
+				(event.event === "unlabeled" &&
+					"label" in event &&
+					event.label.name === label)),
+	);
 
 	if (newerEvent) {
 		core.info(
-			`PR #${record.pullRequest} has a newer ${String(newerEvent.event)} event than review ${record.review}, so it won't be labeled.`,
+			`PR #${record.pullRequest} has a ${newerEvent.event} event since review ${record.review}, so it won't be labeled.`,
 		);
 		return;
 	}

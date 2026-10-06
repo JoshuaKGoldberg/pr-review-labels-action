@@ -6,9 +6,11 @@ export interface MockOctokit {
 	mocks: Record<
 		| "addLabels"
 		| "downloadArtifact"
+		| "getCollaboratorPermissionLevel"
 		| "getPullRequest"
 		| "getReview"
-		| "listEventsForTimeline"
+		| "listEvents"
+		| "listReviews"
 		| "listWorkflowRunArtifacts"
 		| "paginate"
 		| "removeLabel",
@@ -33,9 +35,11 @@ export function createMockOctokit(): MockOctokit {
 	const mocks = {
 		addLabels: vi.fn(),
 		downloadArtifact: vi.fn(),
+		getCollaboratorPermissionLevel: vi.fn(),
 		getPullRequest: vi.fn(),
 		getReview: vi.fn(),
-		listEventsForTimeline: vi.fn(),
+		listEvents: vi.fn(),
+		listReviews: vi.fn(),
 		listWorkflowRunArtifacts: vi.fn(),
 		paginate: vi.fn(),
 		removeLabel: vi.fn(),
@@ -50,10 +54,17 @@ export function createMockOctokit(): MockOctokit {
 			},
 			issues: {
 				addLabels: mocks.addLabels,
-				listEventsForTimeline: mocks.listEventsForTimeline,
+				listEvents: mocks.listEvents,
 				removeLabel: mocks.removeLabel,
 			},
-			pulls: { get: mocks.getPullRequest, getReview: mocks.getReview },
+			pulls: {
+				get: mocks.getPullRequest,
+				getReview: mocks.getReview,
+				listReviews: mocks.listReviews,
+			},
+			repos: {
+				getCollaboratorPermissionLevel: mocks.getCollaboratorPermissionLevel,
+			},
 		},
 	} as unknown as Octokit;
 

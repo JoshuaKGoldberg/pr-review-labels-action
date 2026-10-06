@@ -7,9 +7,13 @@ import {
 	type BlobResponse,
 	downloadRecord,
 	getBlobWithHttpClient,
-	InvalidRecordError,
 } from "./downloadRecord.ts";
-import { createContext, createMockOctokit } from "./testUtils.ts";
+import { InvalidRecordError } from "./InvalidRecordError.ts";
+import {
+	createContext,
+	createMockOctokit,
+	createRequestError,
+} from "./testUtils.ts";
 
 const context = createContext("workflow_run", {});
 const location = "https://blob.example.com/record?sig=abc";
@@ -139,26 +143,67 @@ describe(downloadRecord, () => {
 		expect(getBlob).toHaveBeenCalledWith(location);
 	});
 
-	it("throws when the API does not provide a location", async () => {
+	it("throws an InvalidRecordError when the API does not provide a location", async () => {
 		await expect(
 			runDownload([createArtifact()], undefined, {}),
 		).rejects.toThrow(
-			"Could not locate the pr-review-labels-record.json artifact download (HTTP 302).",
+			new InvalidRecordError(
+				"Could not locate the pr-review-labels-record.json artifact download.",
+			),
 		);
 	});
 
-	it("throws when the download fails", async () => {
+	it("throws an InvalidRecordError when the API cannot find the artifact", async () => {
+		const { mocks, octokit } = createMockOctokit();
+		mocks.listWorkflowRunArtifacts.mockResolvedValue({
+			data: { artifacts: [createArtifact()] },
+		});
+		mocks.downloadArtifact.mockRejectedValue(createRequestError(410));
+
 		await expect(
-			runDownload(
-				[createArtifact()],
-				vi.fn(() =>
-					Promise.resolve({ body: toAsyncIterable([]), statusCode: 403 }),
-				),
-			),
+			downloadRecord({ context, octokit, runId: 456 }),
 		).rejects.toThrow(
-			"Could not download the pr-review-labels-record.json artifact (HTTP 403).",
+			new InvalidRecordError(
+				"Could not locate the pr-review-labels-record.json artifact download (HTTP 410).",
+			),
 		);
 	});
+
+	it("rethrows server errors from the API", async () => {
+		const { mocks, octokit } = createMockOctokit();
+		mocks.listWorkflowRunArtifacts.mockResolvedValue({
+			data: { artifacts: [createArtifact()] },
+		});
+		mocks.downloadArtifact.mockRejectedValue(createRequestError(500));
+
+		await expect(
+			downloadRecord({ context, octokit, runId: 456 }),
+		).rejects.not.toBeInstanceOf(InvalidRecordError);
+	});
+
+	it.each([
+		[403, InvalidRecordError],
+		[404, InvalidRecordError],
+		[500, Error],
+		[undefined, Error],
+	])(
+		"throws when the download responds with %s",
+		async (statusCode, ErrorType) => {
+			const error: unknown = await runDownload(
+				[createArtifact()],
+				vi.fn(() => Promise.resolve({ body: toAsyncIterable([]), statusCode })),
+			).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(ErrorType);
+			expect(error instanceof InvalidRecordError).toBe(
+				ErrorType === InvalidRecordError,
+			);
+			expect(error).toHaveProperty(
+				"message",
+				`Could not download the pr-review-labels-record.json artifact (HTTP ${String(statusCode)}).`,
+			);
+		},
+	);
 
 	it("throws an InvalidRecordError when the download is larger than its reported size allows", async () => {
 		await expect(

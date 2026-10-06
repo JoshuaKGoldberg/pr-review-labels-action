@@ -2,6 +2,7 @@ import { HttpClient } from "@actions/http-client";
 
 import type { ActionContext, Octokit } from "./types.ts";
 
+import { InvalidRecordError } from "./InvalidRecordError.ts";
 import {
 	parseRecord,
 	recordFileName,
@@ -11,9 +12,6 @@ import {
 
 const requestTimeout = 30_000;
 
-/**
- * Thrown when an untrusted record artifact can't be used.
- */
 export interface BlobResponse {
 	body: AsyncIterable<Uint8Array>;
 	statusCode: number | undefined;
@@ -25,8 +23,6 @@ export interface DownloadRecordSettings {
 	octokit: Octokit;
 	runId: number;
 }
-
-export class InvalidRecordError extends Error {}
 
 /**
  * Downloads the untrusted record uploaded by a pull_request_review workflow run.
@@ -74,29 +70,44 @@ export async function downloadRecord({
 		);
 	}
 
-	const { headers, status } = await octokit.rest.actions.downloadArtifact({
-		archive_format: "zip",
-		artifact_id: artifact.id,
-		owner,
-		repo,
-		request: {
-			redirect: "manual",
-			signal: AbortSignal.timeout(requestTimeout),
-		},
-	});
+	let location: string | undefined;
 
-	if (!headers.location) {
-		throw new Error(
-			`Could not locate the ${recordFileName} artifact download (HTTP ${status}).`,
+	try {
+		const { headers } = await octokit.rest.actions.downloadArtifact({
+			archive_format: "zip",
+			artifact_id: artifact.id,
+			owner,
+			repo,
+			request: {
+				redirect: "manual",
+				signal: AbortSignal.timeout(requestTimeout),
+			},
+		});
+		location = headers.location;
+	} catch (error) {
+		if (isClientError(error)) {
+			throw new InvalidRecordError(
+				`Could not locate the ${recordFileName} artifact download (HTTP ${error.status}).`,
+			);
+		}
+
+		throw error;
+	}
+
+	if (!location) {
+		throw new InvalidRecordError(
+			`Could not locate the ${recordFileName} artifact download.`,
 		);
 	}
 
-	const response = await getBlob(headers.location);
+	const response = await getBlob(location);
 
 	if (response.statusCode !== 200) {
-		throw new Error(
-			`Could not download the ${recordFileName} artifact (HTTP ${String(response.statusCode)}).`,
-		);
+		const message = `Could not download the ${recordFileName} artifact (HTTP ${String(response.statusCode)}).`;
+
+		throw response.statusCode && response.statusCode < 500
+			? new InvalidRecordError(message)
+			: new Error(message);
 	}
 
 	const bytes = await readLimitedBytes(response.body, recordMaximumBytes);
@@ -140,6 +151,17 @@ export async function getBlobWithHttpClient(
 		body: message as AsyncIterable<Uint8Array>,
 		statusCode: message.statusCode,
 	};
+}
+
+function isClientError(error: unknown): error is { status: number } {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"status" in error &&
+		typeof error.status === "number" &&
+		error.status >= 400 &&
+		error.status < 500
+	);
 }
 
 async function readLimitedBytes(

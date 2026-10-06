@@ -29113,7 +29113,7 @@ module.exports = {
 __nccwpck_require__.a(module, async (__webpack_handle_async_dependencies__, __webpack_async_result__) => { try {
 /* harmony import */ var _actions_core__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(3724);
 /* harmony import */ var _actions_github__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(9132);
-/* harmony import */ var _runAction_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(4052);
+/* harmony import */ var _runAction_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(8058);
 
 
 
@@ -29129,7 +29129,7 @@ __webpack_async_result__();
 
 /***/ }),
 
-/***/ 4052:
+/***/ 8058:
 /***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require__) => {
 
 
@@ -29142,129 +29142,11 @@ __nccwpck_require__.d(__webpack_exports__, {
 var core = __nccwpck_require__(3724);
 // EXTERNAL MODULE: ./node_modules/.pnpm/@actions+github@9.1.1/node_modules/@actions/github/lib/github.js
 var github = __nccwpck_require__(9132);
-// EXTERNAL MODULE: ./node_modules/.pnpm/@actions+http-client@4.0.1/node_modules/@actions/http-client/lib/index.js + 1 modules
-var lib = __nccwpck_require__(2920);
-;// CONCATENATED MODULE: ./src/record.ts
-const recordFileName = "pr-review-labels-record.json";
+;// CONCATENATED MODULE: ./src/InvalidRecordError.ts
 /**
- * Records are tiny, so anything larger than this is rejected before downloading.
+ * Thrown when an untrusted record artifact can't be used.
  */
-const recordMaximumBytes = 1024;
-/**
- * Parses an untrusted record, returning undefined if it isn't exactly a ReviewRecord.
- */
-function parseRecord(text) {
-    let data;
-    try {
-        data = JSON.parse(text);
-    }
-    catch {
-        return undefined;
-    }
-    if (typeof data !== "object" || data === null || Array.isArray(data)) {
-        return undefined;
-    }
-    if (Object.keys(data).sort().join() !== "pullRequest,review") {
-        return undefined;
-    }
-    const { pullRequest, review } = data;
-    return isId(pullRequest) && isId(review)
-        ? { pullRequest, review }
-        : undefined;
-}
-function isId(value) {
-    return Number.isSafeInteger(value) && value > 0;
-}
-
-;// CONCATENATED MODULE: ./src/downloadRecord.ts
-
-
-const requestTimeout = 30_000;
 class InvalidRecordError extends Error {
-}
-/**
- * Downloads the untrusted record uploaded by a pull_request_review workflow run.
- * Never unzips or writes to disk: the record must be a small JSON file that wasn't zipped.
- */
-async function downloadRecord({ context, getBlob = getBlobWithHttpClient, octokit, runId, }) {
-    const { owner, repo } = context.repo;
-    const { data } = await octokit.rest.actions.listWorkflowRunArtifacts({
-        name: recordFileName,
-        owner,
-        per_page: 100,
-        repo,
-        run_id: runId,
-    });
-    const artifacts = data.artifacts.filter((artifact) => artifact.name === recordFileName);
-    if (!artifacts.length) {
-        return undefined;
-    }
-    if (artifacts.length > 1) {
-        throw new InvalidRecordError(`Expected one ${recordFileName} artifact, but found ${artifacts.length}.`);
-    }
-    const [artifact] = artifacts;
-    if (artifact.expired) {
-        throw new InvalidRecordError(`The ${recordFileName} artifact has expired.`);
-    }
-    // The uploader reports this size, so the download is also capped below.
-    if (artifact.size_in_bytes > recordMaximumBytes) {
-        throw new InvalidRecordError(`The ${recordFileName} artifact is too large.`);
-    }
-    const { headers, status } = await octokit.rest.actions.downloadArtifact({
-        archive_format: "zip",
-        artifact_id: artifact.id,
-        owner,
-        repo,
-        request: {
-            redirect: "manual",
-            signal: AbortSignal.timeout(requestTimeout),
-        },
-    });
-    if (!headers.location) {
-        throw new Error(`Could not locate the ${recordFileName} artifact download (HTTP ${status}).`);
-    }
-    const response = await getBlob(headers.location);
-    if (response.statusCode !== 200) {
-        throw new Error(`Could not download the ${recordFileName} artifact (HTTP ${String(response.statusCode)}).`);
-    }
-    const bytes = await readLimitedBytes(response.body, recordMaximumBytes);
-    if (!bytes) {
-        throw new InvalidRecordError(`The ${recordFileName} artifact is too large.`);
-    }
-    let text;
-    try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    }
-    catch {
-        throw new InvalidRecordError(`The ${recordFileName} artifact is not valid UTF-8.`);
-    }
-    const record = parseRecord(text);
-    if (!record) {
-        throw new InvalidRecordError(`The ${recordFileName} artifact is not a valid record.`);
-    }
-    return record;
-}
-async function getBlobWithHttpClient(url) {
-    const client = new lib/* HttpClient */.Qq("pr-review-labels-action", [], {
-        socketTimeout: requestTimeout,
-    });
-    const { message } = await client.get(url);
-    return {
-        body: message,
-        statusCode: message.statusCode,
-    };
-}
-async function readLimitedBytes(body, maximum) {
-    const chunks = [];
-    let total = 0;
-    for await (const chunk of body) {
-        total += chunk.byteLength;
-        if (total > maximum) {
-            return undefined;
-        }
-        chunks.push(chunk);
-    }
-    return Buffer.concat(chunks);
 }
 
 ;// CONCATENATED MODULE: ./src/isNotFound.ts
@@ -29279,12 +29161,17 @@ function isNotFound(error) {
 
 
 
-const maintainerAssociations = new Set(["COLLABORATOR", "MEMBER", "OWNER"]);
+const maintainerPermissions = new Set(["admin", "write"]);
+const newerReviewStates = new Set([
+    "APPROVED",
+    "CHANGES_REQUESTED",
+    "DISMISSED",
+]);
 /**
  * Runs in the privileged workflow_run workflow.
  * Treats the record as untrusted: the label is only added if GitHub's API confirms
- * a maintainer's review requesting changes on that PR, for the commit the recording
- * run ran on, with no newer review request or decision from that reviewer.
+ * a review requesting changes on that PR from someone with write access, for the
+ * commit the recording run ran on, with nothing newer that would undo it.
  */
 async function applyLabel({ context, downloadRecord, label, octokit, }) {
     const run = context.payload.workflow_run;
@@ -29336,8 +29223,8 @@ async function applyLabel({ context, downloadRecord, label, octokit, }) {
         core/* info */.pq(`Review ${record.review} on PR #${record.pullRequest} is ${review.state}, not CHANGES_REQUESTED.`);
         return;
     }
-    if (!maintainerAssociations.has(review.author_association)) {
-        core/* info */.pq(`Review ${record.review} on PR #${record.pullRequest} is from a ${review.author_association} reviewer, not a collaborator, member, or owner.`);
+    if (!review.user || !review.submitted_at) {
+        core/* info */.pq(`Review ${record.review} on PR #${record.pullRequest} has no reviewer or submission time.`);
         return;
     }
     if (review.commit_id !== run.head_sha &&
@@ -29345,24 +29232,41 @@ async function applyLabel({ context, downloadRecord, label, octokit, }) {
         core/* info */.pq(`Neither review ${record.review} nor PR #${record.pullRequest} is on commit ${run.head_sha}, which the workflow run ran on.`);
         return;
     }
-    const timeline = await octokit.paginate(octokit.rest.issues.listEventsForTimeline, {
+    const reviewer = review.user;
+    const permission = await getOrUndefined(() => octokit.rest.repos.getCollaboratorPermissionLevel({
+        ...context.repo,
+        username: reviewer.login,
+    }));
+    if (!maintainerPermissions.has(permission?.permission ?? "none")) {
+        core/* info */.pq(`Review ${record.review} on PR #${record.pullRequest} is from a reviewer without write access.`);
+        return;
+    }
+    const submittedAt = Date.parse(review.submitted_at);
+    const isSinceReview = (time) => !!time && Date.parse(time) >= submittedAt;
+    const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+        ...context.repo,
+        per_page: 100,
+        pull_number: record.pullRequest,
+    });
+    if (reviews.some((other) => other.id !== review.id &&
+        other.user?.id === reviewer.id &&
+        newerReviewStates.has(other.state) &&
+        isSinceReview(other.submitted_at))) {
+        core/* info */.pq(`The reviewer submitted a newer review on PR #${record.pullRequest} than review ${record.review}, so it won't be labeled.`);
+        return;
+    }
+    const events = await octokit.paginate(octokit.rest.issues.listEvents, {
         ...context.repo,
         issue_number: record.pullRequest,
         per_page: 100,
     });
-    const reviewIndex = timeline.findIndex((event) => event.event === "reviewed" && event.id === review.id);
-    if (reviewIndex === -1) {
-        core/* warning */.$e(`Review ${record.review} is not in PR #${record.pullRequest}'s timeline.`);
-        return;
-    }
-    const newerEvent = timeline
-        .slice(reviewIndex + 1)
-        .find((event) => event.event === "review_requested" ||
-        (event.event === "reviewed" &&
-            event.user?.id === review.user?.id &&
-            event.state?.toLowerCase() !== "commented"));
+    const newerEvent = events.find((event) => isSinceReview(event.created_at) &&
+        (event.event === "review_requested" ||
+            (event.event === "unlabeled" &&
+                "label" in event &&
+                event.label.name === label)));
     if (newerEvent) {
-        core/* info */.pq(`PR #${record.pullRequest} has a newer ${String(newerEvent.event)} event than review ${record.review}, so it won't be labeled.`);
+        core/* info */.pq(`PR #${record.pullRequest} has a ${newerEvent.event} event since review ${record.review}, so it won't be labeled.`);
         return;
     }
     await octokit.rest.issues.addLabels({
@@ -29382,6 +29286,151 @@ async function getOrUndefined(request) {
         }
         throw error;
     }
+}
+
+// EXTERNAL MODULE: ./node_modules/.pnpm/@actions+http-client@4.0.1/node_modules/@actions/http-client/lib/index.js + 1 modules
+var lib = __nccwpck_require__(2920);
+;// CONCATENATED MODULE: ./src/record.ts
+const recordFileName = "pr-review-labels-record.json";
+/**
+ * Records are tiny, so anything larger than this is rejected before downloading.
+ */
+const recordMaximumBytes = 1024;
+/**
+ * Parses an untrusted record, returning undefined if it isn't exactly a ReviewRecord.
+ */
+function parseRecord(text) {
+    let data;
+    try {
+        data = JSON.parse(text);
+    }
+    catch {
+        return undefined;
+    }
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+        return undefined;
+    }
+    if (Object.keys(data).sort().join() !== "pullRequest,review") {
+        return undefined;
+    }
+    const { pullRequest, review } = data;
+    return isId(pullRequest) && isId(review)
+        ? { pullRequest, review }
+        : undefined;
+}
+function isId(value) {
+    return Number.isSafeInteger(value) && value > 0;
+}
+
+;// CONCATENATED MODULE: ./src/downloadRecord.ts
+
+
+
+const requestTimeout = 30_000;
+/**
+ * Downloads the untrusted record uploaded by a pull_request_review workflow run.
+ * Never unzips or writes to disk: the record must be a small JSON file that wasn't zipped.
+ */
+async function downloadRecord({ context, getBlob = getBlobWithHttpClient, octokit, runId, }) {
+    const { owner, repo } = context.repo;
+    const { data } = await octokit.rest.actions.listWorkflowRunArtifacts({
+        name: recordFileName,
+        owner,
+        per_page: 100,
+        repo,
+        run_id: runId,
+    });
+    const artifacts = data.artifacts.filter((artifact) => artifact.name === recordFileName);
+    if (!artifacts.length) {
+        return undefined;
+    }
+    if (artifacts.length > 1) {
+        throw new InvalidRecordError(`Expected one ${recordFileName} artifact, but found ${artifacts.length}.`);
+    }
+    const [artifact] = artifacts;
+    if (artifact.expired) {
+        throw new InvalidRecordError(`The ${recordFileName} artifact has expired.`);
+    }
+    // The uploader reports this size, so the download is also capped below.
+    if (artifact.size_in_bytes > recordMaximumBytes) {
+        throw new InvalidRecordError(`The ${recordFileName} artifact is too large.`);
+    }
+    let location;
+    try {
+        const { headers } = await octokit.rest.actions.downloadArtifact({
+            archive_format: "zip",
+            artifact_id: artifact.id,
+            owner,
+            repo,
+            request: {
+                redirect: "manual",
+                signal: AbortSignal.timeout(requestTimeout),
+            },
+        });
+        location = headers.location;
+    }
+    catch (error) {
+        if (isClientError(error)) {
+            throw new InvalidRecordError(`Could not locate the ${recordFileName} artifact download (HTTP ${error.status}).`);
+        }
+        throw error;
+    }
+    if (!location) {
+        throw new InvalidRecordError(`Could not locate the ${recordFileName} artifact download.`);
+    }
+    const response = await getBlob(location);
+    if (response.statusCode !== 200) {
+        const message = `Could not download the ${recordFileName} artifact (HTTP ${String(response.statusCode)}).`;
+        throw response.statusCode && response.statusCode < 500
+            ? new InvalidRecordError(message)
+            : new Error(message);
+    }
+    const bytes = await readLimitedBytes(response.body, recordMaximumBytes);
+    if (!bytes) {
+        throw new InvalidRecordError(`The ${recordFileName} artifact is too large.`);
+    }
+    let text;
+    try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    }
+    catch {
+        throw new InvalidRecordError(`The ${recordFileName} artifact is not valid UTF-8.`);
+    }
+    const record = parseRecord(text);
+    if (!record) {
+        throw new InvalidRecordError(`The ${recordFileName} artifact is not a valid record.`);
+    }
+    return record;
+}
+async function getBlobWithHttpClient(url) {
+    const client = new lib/* HttpClient */.Qq("pr-review-labels-action", [], {
+        socketTimeout: requestTimeout,
+    });
+    const { message } = await client.get(url);
+    return {
+        body: message,
+        statusCode: message.statusCode,
+    };
+}
+function isClientError(error) {
+    return (typeof error === "object" &&
+        error !== null &&
+        "status" in error &&
+        typeof error.status === "number" &&
+        error.status >= 400 &&
+        error.status < 500);
+}
+async function readLimitedBytes(body, maximum) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of body) {
+        total += chunk.byteLength;
+        if (total > maximum) {
+            return undefined;
+        }
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
 }
 
 // EXTERNAL MODULE: external "node:fs/promises"
