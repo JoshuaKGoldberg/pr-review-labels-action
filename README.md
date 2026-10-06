@@ -102,6 +102,11 @@ It then only adds the label if GitHub's API confirms that:
 On `pull_request_target`, the action removes the label when a review is requested.
 It never checks out or runs code from the pull request.
 
+### Limitations
+
+GitHub doesn't run `pull_request_review` workflows on pull requests with merge conflicts.
+Reviews requesting changes on those pull requests won't add the label.
+
 ## Development
 
 See [`.github/CONTRIBUTING.md`](./.github/CONTRIBUTING.md), then [`.github/DEVELOPMENT.md`](./.github/DEVELOPMENT.md).
