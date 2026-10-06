@@ -190,7 +190,7 @@ export async function applyLabel({
 
 	if (newerEvent) {
 		core.info(
-			`PR #${record.pullRequest} has a ${newerEvent.event} event since review ${record.review}, so it won't be labeled.`,
+			`PR #${record.pullRequest} has a newer event (${newerEvent.event}) than review ${record.review}, so it won't be labeled.`,
 		);
 		return;
 	}

@@ -29266,7 +29266,7 @@ async function applyLabel({ context, downloadRecord, label, octokit, }) {
                 "label" in event &&
                 event.label.name === label)));
     if (newerEvent) {
-        core/* info */.pq(`PR #${record.pullRequest} has a ${newerEvent.event} event since review ${record.review}, so it won't be labeled.`);
+        core/* info */.pq(`PR #${record.pullRequest} has a newer event (${newerEvent.event}) than review ${record.review}, so it won't be labeled.`);
         return;
     }
     await octokit.rest.issues.addLabels({

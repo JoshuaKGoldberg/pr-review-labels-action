@@ -1,6 +1,6 @@
 {
 	"name": "pr-review-labels-action",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"description": "Adds and removes a 'status: waiting for author' label on PR reviews, including PRs from forks. 🏷️",
 	"repository": {
 		"type": "git",

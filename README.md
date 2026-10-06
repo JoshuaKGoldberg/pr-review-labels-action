@@ -55,7 +55,6 @@ jobs:
   pr_review_labels:
     permissions:
       actions: read
-      issues: read
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
