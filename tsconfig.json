@@ -1,0 +1,16 @@
+{
+	"compilerOptions": {
+		"declaration": true,
+		"esModuleInterop": true,
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"outDir": "lib",
+		"resolveJsonModule": true,
+		"rewriteRelativeImportExtensions": true,
+		"rootDir": "src",
+		"skipLibCheck": true,
+		"strict": true,
+		"target": "ES2023"
+	},
+	"include": ["src"]
+}

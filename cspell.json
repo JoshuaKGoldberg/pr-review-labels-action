@@ -1,0 +1,13 @@
+{
+	"dictionaries": ["npm", "node", "typescript"],
+	"ignorePaths": [
+		".all-contributorsrc",
+		"CHANGELOG.md",
+		"coverage",
+		"dist",
+		"lib",
+		"node_modules",
+		"pnpm-lock.yaml"
+	],
+	"words": ["eeef", "octoguide"]
+}
