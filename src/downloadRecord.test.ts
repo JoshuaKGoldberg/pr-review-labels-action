@@ -1,6 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import type { AddressInfo } from "node:net";
 
-import { downloadRecord } from "./downloadRecord.ts";
+import * as http from "node:http";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
+
+import {
+	type BlobResponse,
+	downloadRecord,
+	getBlobWithHttpClient,
+	InvalidRecordError,
+} from "./downloadRecord.ts";
 import { createContext, createMockOctokit } from "./testUtils.ts";
 
 const context = createContext("workflow_run", {});
@@ -16,52 +24,59 @@ function createArtifact(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function createFetcher(
-	body: BodyInit | null,
-	redirect: { location?: string; status?: number } = {},
-	status = 200,
-) {
-	return vi.fn<typeof fetch>((url) =>
-		Promise.resolve(
-			url === location
-				? new Response(body, { status })
-				: new Response(null, {
-						headers:
-							redirect.location === undefined && "location" in redirect
-								? {}
-								: { location: redirect.location ?? location },
-						status: redirect.status ?? 302,
-					}),
-		),
-	);
+function createBlob(
+	...chunks: (string | Uint8Array)[]
+): () => Promise<BlobResponse> {
+	return () =>
+		Promise.resolve({
+			body: toAsyncIterable(
+				chunks.map((chunk) =>
+					typeof chunk === "string" ? Buffer.from(chunk) : chunk,
+				),
+			),
+			statusCode: 200,
+		});
 }
 
 async function runDownload(
 	artifacts: ReturnType<typeof createArtifact>[],
-	fetcher: typeof fetch = createFetcher(`{"pullRequest":1,"review":2}`),
+	getBlob: Mock<(url: string) => Promise<BlobResponse>> = vi.fn(
+		createBlob(`{"pullRequest":1,"review":2}`),
+	),
+	downloadHeaders: Record<string, string> = { location },
 ) {
 	const { mocks, octokit } = createMockOctokit();
 	mocks.listWorkflowRunArtifacts.mockResolvedValue({ data: { artifacts } });
+	mocks.downloadArtifact.mockResolvedValue({
+		headers: downloadHeaders,
+		status: 302,
+	});
 
 	const result = await downloadRecord({
 		context,
-		fetcher,
+		getBlob,
 		octokit,
 		runId: 456,
-		token: "secret-token",
 	});
 
-	return { mocks, result };
+	return { getBlob, mocks, result };
+}
+
+function toAsyncIterable(chunks: Uint8Array[]): AsyncIterable<Uint8Array> {
+	return {
+		[Symbol.asyncIterator]() {
+			const iterator = chunks[Symbol.iterator]();
+			return { next: () => Promise.resolve(iterator.next()) };
+		},
+	};
 }
 
 describe(downloadRecord, () => {
 	it("returns undefined when there is no record artifact", async () => {
-		const fetcher = createFetcher(null);
-
-		const { result } = await runDownload([], fetcher);
+		const { mocks, result } = await runDownload([]);
 
 		expect(result).toBeUndefined();
-		expect(fetcher).not.toHaveBeenCalled();
+		expect(mocks.downloadArtifact).not.toHaveBeenCalled();
 	});
 
 	it("ignores artifacts with other names", async () => {
@@ -82,128 +97,202 @@ describe(downloadRecord, () => {
 		});
 	});
 
-	it("throws when there are multiple record artifacts", async () => {
+	it("throws an InvalidRecordError when there are multiple record artifacts", async () => {
 		await expect(
 			runDownload([createArtifact(), createArtifact({ id: 124 })]),
 		).rejects.toThrow(
-			"Expected one pr-review-labels-record.json artifact, but found 2.",
+			new InvalidRecordError(
+				"Expected one pr-review-labels-record.json artifact, but found 2.",
+			),
 		);
 	});
 
-	it("throws when the record artifact is expired", async () => {
+	it("throws an InvalidRecordError when the record artifact is expired", async () => {
 		await expect(
 			runDownload([createArtifact({ expired: true })]),
-		).rejects.toThrow("has expired");
+		).rejects.toBeInstanceOf(InvalidRecordError);
 	});
 
-	it("throws without downloading when the artifact reports a large size", async () => {
-		const fetcher = createFetcher(null);
+	it("throws an InvalidRecordError without downloading when the artifact reports a large size", async () => {
+		const getBlob = vi.fn(createBlob());
 
 		await expect(
-			runDownload([createArtifact({ size_in_bytes: 1025 })], fetcher),
-		).rejects.toThrow("is too large");
-		expect(fetcher).not.toHaveBeenCalled();
-	});
-
-	it("only sends the token to the GitHub API, not to the download location", async () => {
-		const fetcher = createFetcher(`{"pullRequest":1,"review":2}`);
-
-		await runDownload([createArtifact()], fetcher);
-
-		expect(fetcher.mock.calls).toEqual([
-			[
-				"https://api.github.com/repos/test-owner/test-repo/actions/artifacts/123/zip",
-				{
-					headers: {
-						Accept: "application/vnd.github+json",
-						Authorization: "Bearer secret-token",
-					},
-					redirect: "manual",
-				},
-			],
-			[location],
-		]);
-	});
-
-	it("throws when the API does not redirect", async () => {
-		await expect(
-			runDownload([createArtifact()], createFetcher(null, { status: 404 })),
+			runDownload([createArtifact({ size_in_bytes: 1025 })], getBlob),
 		).rejects.toThrow(
-			"Could not locate the pr-review-labels-record.json artifact download (HTTP 404).",
+			new InvalidRecordError(
+				"The pr-review-labels-record.json artifact is too large.",
+			),
 		);
+		expect(getBlob).not.toHaveBeenCalled();
 	});
 
-	it("throws when the redirect has no location", async () => {
+	it("asks the API for the download location without following the redirect", async () => {
+		const { getBlob, mocks } = await runDownload([createArtifact()]);
+
+		expect(mocks.downloadArtifact).toHaveBeenCalledWith({
+			archive_format: "zip",
+			artifact_id: 123,
+			owner: "test-owner",
+			repo: "test-repo",
+			request: { redirect: "manual", signal: expect.any(AbortSignal) },
+		});
+		expect(getBlob).toHaveBeenCalledWith(location);
+	});
+
+	it("throws when the API does not provide a location", async () => {
 		await expect(
-			runDownload(
-				[createArtifact()],
-				createFetcher(null, { location: undefined }),
-			),
-		).rejects.toThrow("Could not locate");
+			runDownload([createArtifact()], undefined, {}),
+		).rejects.toThrow(
+			"Could not locate the pr-review-labels-record.json artifact download (HTTP 302).",
+		);
 	});
 
 	it("throws when the download fails", async () => {
 		await expect(
-			runDownload([createArtifact()], createFetcher("", {}, 403)),
+			runDownload(
+				[createArtifact()],
+				vi.fn(() =>
+					Promise.resolve({ body: toAsyncIterable([]), statusCode: 403 }),
+				),
+			),
 		).rejects.toThrow(
 			"Could not download the pr-review-labels-record.json artifact (HTTP 403).",
 		);
 	});
 
-	it("throws when the download is larger than its reported size allows", async () => {
+	it("throws an InvalidRecordError when the download is larger than its reported size allows", async () => {
 		await expect(
-			runDownload([createArtifact()], createFetcher("x".repeat(1025))),
-		).rejects.toThrow("is too large");
+			runDownload([createArtifact()], vi.fn(createBlob("x".repeat(1025)))),
+		).rejects.toThrow(
+			new InvalidRecordError(
+				"The pr-review-labels-record.json artifact is too large.",
+			),
+		);
 	});
 
 	it("stops reading a download as soon as it is too large", async () => {
-		let pulls = 0;
-		const body = new ReadableStream<Uint8Array>({
-			pull(controller) {
-				pulls += 1;
-				controller.enqueue(new Uint8Array(512));
-			},
+		let reads = 0;
+		const body: AsyncIterable<Uint8Array> = {
+			[Symbol.asyncIterator]: () => ({
+				next: () => {
+					reads += 1;
+					return Promise.resolve({ done: false, value: new Uint8Array(512) });
+				},
+			}),
+		};
+		const getBlob = () => Promise.resolve({ body, statusCode: 200 });
+
+		await expect(
+			runDownload([createArtifact()], vi.fn(getBlob)),
+		).rejects.toBeInstanceOf(InvalidRecordError);
+		expect(reads).toBe(3);
+	});
+
+	it("throws an InvalidRecordError when the download is not valid UTF-8", async () => {
+		await expect(
+			runDownload(
+				[createArtifact()],
+				vi.fn(createBlob(new Uint8Array([0xff, 0xfe]))),
+			),
+		).rejects.toThrow(
+			new InvalidRecordError(
+				"The pr-review-labels-record.json artifact is not valid UTF-8.",
+			),
+		);
+	});
+
+	it.each([
+		["a zip archive", new Uint8Array([0x50, 0x4b, 0x03, 0x04])],
+		["an invalid record", `{"pullRequest":"1"}`],
+		["empty", ""],
+	])(
+		"throws an InvalidRecordError when the download is %s",
+		async (_, body) => {
+			await expect(
+				runDownload([createArtifact()], vi.fn(createBlob(body))),
+			).rejects.toThrow(
+				new InvalidRecordError(
+					"The pr-review-labels-record.json artifact is not a valid record.",
+				),
+			);
+		},
+	);
+
+	it("returns the record when the download is split across chunks", async () => {
+		const { result } = await runDownload(
+			[createArtifact()],
+			vi.fn(createBlob(`{"pullRequest":1,`, `"review":2}`)),
+		);
+
+		expect(result).toEqual({ pullRequest: 1, review: 2 });
+	});
+});
+
+describe(getBlobWithHttpClient, () => {
+	let server: http.Server | undefined;
+
+	afterEach(() => {
+		server?.close();
+		server = undefined;
+	});
+
+	async function serve(handler: http.RequestListener) {
+		server = http.createServer(handler);
+		await new Promise<void>((resolve) =>
+			server?.listen(0, "127.0.0.1", resolve),
+		);
+		return `http://127.0.0.1:${(server.address() as AddressInfo).port}/blob`;
+	}
+
+	it("streams the response body and status code", async () => {
+		const url = await serve((request, response) => {
+			expect(request.headers.authorization).toBeUndefined();
+			response.end(`{"pullRequest":1,"review":2}`);
+		});
+
+		const { result } = await runDownload(
+			[createArtifact()],
+			vi.fn(() => getBlobWithHttpClient(url)),
+		);
+
+		expect(result).toEqual({ pullRequest: 1, review: 2 });
+	});
+
+	it("reports a non-200 status code", async () => {
+		const url = await serve((_, response) => {
+			response.statusCode = 404;
+			response.end();
+		});
+
+		await expect(getBlobWithHttpClient(url)).resolves.toMatchObject({
+			statusCode: 404,
+		});
+	});
+
+	it("stops reading an endless response once it is too large", async () => {
+		let closed = false;
+		const url = await serve((request, response) => {
+			request.socket.on("close", () => {
+				closed = true;
+			});
+			const interval = setInterval(() => {
+				if (!response.write(Buffer.alloc(256, "x"))) {
+					clearInterval(interval);
+				}
+			}, 1);
+			response.on("close", () => {
+				clearInterval(interval);
+			});
 		});
 
 		await expect(
-			runDownload([createArtifact()], createFetcher(body)),
-		).rejects.toThrow("is too large");
-		expect(pulls).toBeLessThan(5);
-	});
-
-	it("throws when the download is not valid UTF-8", async () => {
-		await expect(
 			runDownload(
 				[createArtifact()],
-				createFetcher(new Uint8Array([0xff, 0xfe])),
+				vi.fn(() => getBlobWithHttpClient(url)),
 			),
-		).rejects.toThrow("is not valid UTF-8");
-	});
-
-	it("throws when the download is a zip archive", async () => {
-		await expect(
-			runDownload(
-				[createArtifact()],
-				createFetcher(new Uint8Array([0x50, 0x4b, 0x03, 0x04])),
-			),
-		).rejects.toThrow("is not a valid record");
-	});
-
-	it("throws when the download is not a valid record", async () => {
-		await expect(
-			runDownload([createArtifact()], createFetcher(`{"pullRequest":"1"}`)),
-		).rejects.toThrow("is not a valid record");
-	});
-
-	it("throws when the download is empty", async () => {
-		await expect(
-			runDownload([createArtifact()], createFetcher(null)),
-		).rejects.toThrow("is not a valid record");
-	});
-
-	it("returns the record when the download is valid", async () => {
-		const { result } = await runDownload([createArtifact()]);
-
-		expect(result).toEqual({ pullRequest: 1, review: 2 });
+		).rejects.toBeInstanceOf(InvalidRecordError);
+		await vi.waitFor(() => {
+			expect(closed).toBe(true);
+		});
 	});
 });

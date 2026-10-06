@@ -1,3 +1,5 @@
+import { HttpClient } from "@actions/http-client";
+
 import type { ActionContext, Octokit } from "./types.ts";
 
 import {
@@ -7,13 +9,24 @@ import {
 	type ReviewRecord,
 } from "./record.ts";
 
+const requestTimeout = 30_000;
+
+/**
+ * Thrown when an untrusted record artifact can't be used.
+ */
+export interface BlobResponse {
+	body: AsyncIterable<Uint8Array>;
+	statusCode: number | undefined;
+}
+
 export interface DownloadRecordSettings {
 	context: ActionContext;
-	fetcher?: typeof fetch;
+	getBlob?: (url: string) => Promise<BlobResponse>;
 	octokit: Octokit;
 	runId: number;
-	token: string;
 }
+
+export class InvalidRecordError extends Error {}
 
 /**
  * Downloads the untrusted record uploaded by a pull_request_review workflow run.
@@ -21,10 +34,9 @@ export interface DownloadRecordSettings {
  */
 export async function downloadRecord({
 	context,
-	fetcher = fetch,
+	getBlob = getBlobWithHttpClient,
 	octokit,
 	runId,
-	token,
 }: DownloadRecordSettings): Promise<ReviewRecord | undefined> {
 	const { owner, repo } = context.repo;
 	const { data } = await octokit.rest.actions.listWorkflowRunArtifacts({
@@ -44,7 +56,7 @@ export async function downloadRecord({
 	}
 
 	if (artifacts.length > 1) {
-		throw new Error(
+		throw new InvalidRecordError(
 			`Expected one ${recordFileName} artifact, but found ${artifacts.length}.`,
 		);
 	}
@@ -52,43 +64,47 @@ export async function downloadRecord({
 	const [artifact] = artifacts;
 
 	if (artifact.expired) {
-		throw new Error(`The ${recordFileName} artifact has expired.`);
+		throw new InvalidRecordError(`The ${recordFileName} artifact has expired.`);
 	}
 
+	// The uploader reports this size, so the download is also capped below.
 	if (artifact.size_in_bytes > recordMaximumBytes) {
-		throw new Error(`The ${recordFileName} artifact is too large.`);
+		throw new InvalidRecordError(
+			`The ${recordFileName} artifact is too large.`,
+		);
 	}
 
-	const redirect = await fetcher(
-		`${context.apiUrl}/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`,
-		{
-			headers: {
-				Accept: "application/vnd.github+json",
-				Authorization: `Bearer ${token}`,
-			},
+	const { headers, status } = await octokit.rest.actions.downloadArtifact({
+		archive_format: "zip",
+		artifact_id: artifact.id,
+		owner,
+		repo,
+		request: {
 			redirect: "manual",
+			signal: AbortSignal.timeout(requestTimeout),
 		},
-	);
-	const location = redirect.headers.get("location");
+	});
 
-	if (redirect.status !== 302 || !location) {
+	if (!headers.location) {
 		throw new Error(
-			`Could not locate the ${recordFileName} artifact download (HTTP ${redirect.status}).`,
+			`Could not locate the ${recordFileName} artifact download (HTTP ${status}).`,
 		);
 	}
 
-	const response = await fetcher(location);
+	const response = await getBlob(headers.location);
 
-	if (!response.ok) {
+	if (response.statusCode !== 200) {
 		throw new Error(
-			`Could not download the ${recordFileName} artifact (HTTP ${response.status}).`,
+			`Could not download the ${recordFileName} artifact (HTTP ${String(response.statusCode)}).`,
 		);
 	}
 
-	const bytes = await readLimitedBytes(response, recordMaximumBytes);
+	const bytes = await readLimitedBytes(response.body, recordMaximumBytes);
 
 	if (!bytes) {
-		throw new Error(`The ${recordFileName} artifact is too large.`);
+		throw new InvalidRecordError(
+			`The ${recordFileName} artifact is too large.`,
+		);
 	}
 
 	let text: string;
@@ -96,23 +112,44 @@ export async function downloadRecord({
 	try {
 		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	} catch {
-		throw new Error(`The ${recordFileName} artifact is not valid UTF-8.`);
+		throw new InvalidRecordError(
+			`The ${recordFileName} artifact is not valid UTF-8.`,
+		);
 	}
 
 	const record = parseRecord(text);
 
 	if (!record) {
-		throw new Error(`The ${recordFileName} artifact is not a valid record.`);
+		throw new InvalidRecordError(
+			`The ${recordFileName} artifact is not a valid record.`,
+		);
 	}
 
 	return record;
 }
 
-async function readLimitedBytes(response: Response, maximum: number) {
+export async function getBlobWithHttpClient(
+	url: string,
+): Promise<BlobResponse> {
+	const client = new HttpClient("pr-review-labels-action", [], {
+		socketTimeout: requestTimeout,
+	});
+	const { message } = await client.get(url);
+
+	return {
+		body: message as AsyncIterable<Uint8Array>,
+		statusCode: message.statusCode,
+	};
+}
+
+async function readLimitedBytes(
+	body: AsyncIterable<Uint8Array>,
+	maximum: number,
+) {
 	const chunks: Uint8Array[] = [];
 	let total = 0;
 
-	for await (const chunk of response.body ?? []) {
+	for await (const chunk of body) {
 		total += chunk.byteLength;
 
 		if (total > maximum) {

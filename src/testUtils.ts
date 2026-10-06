@@ -5,9 +5,12 @@ import type { ActionContext, Octokit } from "./types.ts";
 export interface MockOctokit {
 	mocks: Record<
 		| "addLabels"
+		| "downloadArtifact"
 		| "getPullRequest"
 		| "getReview"
+		| "listEventsForTimeline"
 		| "listWorkflowRunArtifacts"
+		| "paginate"
 		| "removeLabel",
 		Mock
 	>;
@@ -29,16 +32,27 @@ export function createContext(
 export function createMockOctokit(): MockOctokit {
 	const mocks = {
 		addLabels: vi.fn(),
+		downloadArtifact: vi.fn(),
 		getPullRequest: vi.fn(),
 		getReview: vi.fn(),
+		listEventsForTimeline: vi.fn(),
 		listWorkflowRunArtifacts: vi.fn(),
+		paginate: vi.fn(),
 		removeLabel: vi.fn(),
 	};
 
 	const octokit = {
+		paginate: mocks.paginate,
 		rest: {
-			actions: { listWorkflowRunArtifacts: mocks.listWorkflowRunArtifacts },
-			issues: { addLabels: mocks.addLabels, removeLabel: mocks.removeLabel },
+			actions: {
+				downloadArtifact: mocks.downloadArtifact,
+				listWorkflowRunArtifacts: mocks.listWorkflowRunArtifacts,
+			},
+			issues: {
+				addLabels: mocks.addLabels,
+				listEventsForTimeline: mocks.listEventsForTimeline,
+				removeLabel: mocks.removeLabel,
+			},
 			pulls: { get: mocks.getPullRequest, getReview: mocks.getReview },
 		},
 	} as unknown as Octokit;

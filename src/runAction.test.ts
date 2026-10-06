@@ -27,20 +27,17 @@ describe(runAction, () => {
 		);
 	});
 
-	it.each(["pull_request", "pull_request_target"])(
-		"removes the label on %s",
-		async (eventName) => {
-			const context = createContext(eventName, {});
+	it("removes the label on pull_request_target", async () => {
+		const context = createContext("pull_request_target", {});
 
-			await runAction(context);
+		await runAction(context);
 
-			expect(removeLabel).toHaveBeenCalledWith({
-				context,
-				label: "test-label",
-				octokit: { token: "test-token" },
-			});
-		},
-	);
+		expect(removeLabel).toHaveBeenCalledWith({
+			context,
+			label: "test-label",
+			octokit: { token: "test-token" },
+		});
+	});
 
 	it("records the review on pull_request_review without reading inputs", async () => {
 		const context = createContext("pull_request_review", {});
@@ -69,13 +66,15 @@ describe(runAction, () => {
 			context,
 			octokit: { token: "test-token" },
 			runId: 456,
-			token: "test-token",
 		});
 	});
 
-	it("throws on unsupported events", async () => {
-		await expect(runAction(createContext("push", {}))).rejects.toThrow(
-			"Unsupported event: push.",
-		);
-	});
+	it.each(["pull_request", "push"])(
+		"throws on unsupported %s events",
+		async (eventName) => {
+			await expect(runAction(createContext(eventName, {}))).rejects.toThrow(
+				`Unsupported event: ${eventName}.`,
+			);
+		},
+	);
 });

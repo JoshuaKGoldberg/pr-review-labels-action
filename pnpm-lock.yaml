@@ -17,6 +17,9 @@ importers:
       '@actions/github':
         specifier: 9.1.1
         version: 9.1.1
+      '@actions/http-client':
+        specifier: 4.0.1
+        version: 4.0.1
     devDependencies:
       '@eslint-community/eslint-plugin-eslint-comments':
         specifier: 4.8.1

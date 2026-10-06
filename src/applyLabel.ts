@@ -3,7 +3,10 @@ import * as core from "@actions/core";
 import type { ReviewRecord } from "./record.ts";
 import type { ActionContext, Octokit } from "./types.ts";
 
+import { InvalidRecordError } from "./downloadRecord.ts";
 import { isNotFound } from "./isNotFound.ts";
+
+const maintainerAssociations = new Set(["COLLABORATOR", "MEMBER", "OWNER"]);
 
 export interface ApplyLabelSettings {
 	context: ActionContext;
@@ -12,10 +15,18 @@ export interface ApplyLabelSettings {
 	octokit: Octokit;
 }
 
+interface TimelineEvent {
+	event?: string;
+	id?: number;
+	state?: string;
+	user?: null | { id: number };
+}
+
 /**
  * Runs in the privileged workflow_run workflow.
  * Treats the record as untrusted: the label is only added if GitHub's API confirms
- * a review requesting changes on that PR, for the commit the recording run ran on.
+ * a maintainer's review requesting changes on that PR, for the commit the recording
+ * run ran on, with no newer review request or decision from that reviewer.
  */
 export async function applyLabel({
 	context,
@@ -46,7 +57,18 @@ export async function applyLabel({
 		return;
 	}
 
-	const record = await downloadRecord(run.id);
+	let record: ReviewRecord | undefined;
+
+	try {
+		record = await downloadRecord(run.id);
+	} catch (error) {
+		if (error instanceof InvalidRecordError) {
+			core.warning(error.message);
+			return;
+		}
+
+		throw error;
+	}
 
 	if (!record) {
 		core.info(
@@ -64,6 +86,13 @@ export async function applyLabel({
 
 	if (!pullRequest) {
 		core.warning(`Recorded PR #${record.pullRequest} does not exist.`);
+		return;
+	}
+
+	if (pullRequest.state !== "open") {
+		core.info(
+			`PR #${record.pullRequest} is ${pullRequest.state}, so it won't be labeled.`,
+		);
 		return;
 	}
 
@@ -89,19 +118,55 @@ export async function applyLabel({
 		return;
 	}
 
+	if (!maintainerAssociations.has(review.author_association)) {
+		core.info(
+			`Review ${record.review} on PR #${record.pullRequest} is from a ${review.author_association} reviewer, not a collaborator, member, or owner.`,
+		);
+		return;
+	}
+
 	if (
 		review.commit_id !== run.head_sha &&
 		pullRequest.head.sha !== run.head_sha
 	) {
-		core.warning(
+		core.info(
 			`Neither review ${record.review} nor PR #${record.pullRequest} is on commit ${run.head_sha}, which the workflow run ran on.`,
 		);
 		return;
 	}
 
-	if (pullRequest.state !== "open") {
+	const timeline: TimelineEvent[] = await octokit.paginate(
+		octokit.rest.issues.listEventsForTimeline,
+		{
+			...context.repo,
+			issue_number: record.pullRequest,
+			per_page: 100,
+		},
+	);
+	const reviewIndex = timeline.findIndex(
+		(event) => event.event === "reviewed" && event.id === review.id,
+	);
+
+	if (reviewIndex === -1) {
+		core.warning(
+			`Review ${record.review} is not in PR #${record.pullRequest}'s timeline.`,
+		);
+		return;
+	}
+
+	const newerEvent = timeline
+		.slice(reviewIndex + 1)
+		.find(
+			(event) =>
+				event.event === "review_requested" ||
+				(event.event === "reviewed" &&
+					event.user?.id === review.user?.id &&
+					event.state?.toLowerCase() !== "commented"),
+		);
+
+	if (newerEvent) {
 		core.info(
-			`PR #${record.pullRequest} is ${pullRequest.state}, so it won't be labeled.`,
+			`PR #${record.pullRequest} has a newer ${String(newerEvent.event)} event than review ${record.review}, so it won't be labeled.`,
 		);
 		return;
 	}

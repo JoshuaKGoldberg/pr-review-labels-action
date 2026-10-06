@@ -21,7 +21,7 @@
 
 This action keeps a `status: waiting for author` label up to date on pull requests:
 
-- When a review requests changes, it adds the label
+- When a collaborator, member, or owner submits a review requesting changes, it adds the label
 - When a review is requested, it removes the label
 
 It works on pull requests from forks, which GitHub doesn't give write permissions to in `pull_request_review` workflows.
@@ -55,6 +55,7 @@ jobs:
   pr_review_labels:
     permissions:
       actions: read
+      issues: read
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
@@ -75,6 +76,9 @@ on:
 
 The `workflows` entry must match the first workflow's `name`.
 
+The second workflow runs with write permissions, so consider pinning the action to a full commit SHA rather than a tag.
+This action only supports github.com, not GitHub Enterprise Server.
+
 ### Inputs
 
 | Input          | Description                                                                            | Default                      |
@@ -87,12 +91,13 @@ The `workflows` entry must match the first workflow's `name`.
 On `pull_request_review`, the action uploads a small artifact containing the pull request and review IDs if the review requested changes.
 That workflow runs with the pull request's code, so the artifact is treated as untrusted.
 
-On `workflow_run`, the action reads that artifact without unzipping it or writing it to disk, rejecting anything that isn't a tiny JSON record.
+On `workflow_run`, the action reads that artifact without unzipping it or writing it to disk, warning on anything that isn't a tiny JSON record.
 It then only adds the label if GitHub's API confirms that:
 
-- The review exists on that pull request and requested changes
-- The review or the pull request's head is on the commit the recording workflow ran on
 - The pull request is open
+- The review exists on that pull request, requested changes, and is from a collaborator, member, or owner
+- The review or the pull request's head is on the commit the recording workflow ran on
+- No review has been requested on the pull request since, and the reviewer hasn't since approved, dismissed, or requested changes again
 
 On `pull_request_target`, the action removes the label when a review is requested.
 It never checks out or runs code from the pull request.

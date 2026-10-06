@@ -1,4 +1,3 @@
-import { DefaultArtifactClient } from "@actions/artifact";
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 
@@ -11,23 +10,24 @@ import { removeLabel } from "./removeLabel.ts";
 
 export async function runAction(context: ActionContext) {
 	switch (context.eventName) {
-		case "pull_request":
+		case "pull_request_review": {
+			// Only the unprivileged recording run needs the (large) artifact client
+			const { DefaultArtifactClient } = await import("@actions/artifact");
+			await recordReview(context, new DefaultArtifactClient());
+			break;
+		}
+
 		case "pull_request_target": {
 			const { label, octokit } = getPrivilegedSettings();
 			await removeLabel({ context, label, octokit });
 			break;
 		}
 
-		case "pull_request_review":
-			await recordReview(context, new DefaultArtifactClient());
-			break;
-
 		case "workflow_run": {
-			const { label, octokit, token } = getPrivilegedSettings();
+			const { label, octokit } = getPrivilegedSettings();
 			await applyLabel({
 				context,
-				downloadRecord: (runId) =>
-					downloadRecord({ context, octokit, runId, token }),
+				downloadRecord: (runId) => downloadRecord({ context, octokit, runId }),
 				label,
 				octokit,
 			});
@@ -45,5 +45,5 @@ function getPrivilegedSettings() {
 	const label = core.getInput("label", { required: true });
 	const token = core.getInput("github-token", { required: true });
 
-	return { label, octokit: github.getOctokit(token), token };
+	return { label, octokit: github.getOctokit(token) };
 }
