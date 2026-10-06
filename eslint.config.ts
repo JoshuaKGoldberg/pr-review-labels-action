@@ -39,6 +39,12 @@ export default defineConfig(
 			},
 		},
 		rules: {
+			// These on-by-default rules work well for this repo if configured
+			"@typescript-eslint/restrict-template-expressions": [
+				"error",
+				{ allowNumber: true },
+			],
+
 			// Stylistic concerns that don't interfere with Prettier
 			"logical-assignment-operators": [
 				"error",
