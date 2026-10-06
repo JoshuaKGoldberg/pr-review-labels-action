@@ -1,0 +1,16 @@
+author: JoshuaKGoldberg
+branding:
+  color: green
+  icon: tag
+description: "Adds and removes a 'status: waiting for author' label on PR reviews, including PRs from forks. 🏷️"
+inputs:
+  github-token:
+    default: ${{ github.token }}
+    description: GitHub token used to read artifacts and edit labels.
+  label:
+    default: "status: waiting for author"
+    description: Label to add when a review requests changes, and to remove when a review is requested.
+name: PR Review Labels Action
+runs:
+  main: dist/index.js
+  using: node24

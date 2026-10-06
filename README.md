@@ -1,4 +1,4 @@
-<h1 align="center">Pr Review Labels Action</h1>
+<h1 align="center">PR Review Labels Action</h1>
 
 <p align="center">
 	Adds and removes a 'status: waiting for author' label on PR reviews, including PRs from forks.
@@ -19,15 +19,83 @@
 
 ## Usage
 
-```shell
-npm i pr-review-labels-action
+This action keeps a `status: waiting for author` label up to date on pull requests:
+
+- When a review requests changes, it adds the label
+- When a review is requested, it removes the label
+
+It works on pull requests from forks, which GitHub doesn't give write permissions to in `pull_request_review` workflows.
+That needs two workflows:
+
+1. An unprivileged `pull_request_review` workflow that records the review
+2. A privileged workflow that adds the label after the first workflow completes, and removes it when a review is requested
+
+`.github/workflows/pr-review-submitted.yaml`:
+
+```yaml
+jobs:
+  pr_review_submitted:
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: JoshuaKGoldberg/pr-review-labels-action@v0.1.0
+
+name: PR Review Submitted
+
+on:
+  pull_request_review:
+    types:
+      - submitted
 ```
 
-```ts
-import { greet } from "pr-review-labels-action";
+`.github/workflows/pr-review-labels.yaml`:
 
-greet("Hello, world! 🏷️");
+```yaml
+jobs:
+  pr_review_labels:
+    permissions:
+      actions: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: JoshuaKGoldberg/pr-review-labels-action@v0.1.0
+
+name: PR Review Labels
+
+on:
+  pull_request_target:
+    types:
+      - review_requested
+  workflow_run:
+    types:
+      - completed
+    workflows:
+      - PR Review Submitted
 ```
+
+The `workflows` entry must match the first workflow's `name`.
+
+### Inputs
+
+| Input          | Description                                                                            | Default                      |
+| -------------- | -------------------------------------------------------------------------------------- | ---------------------------- |
+| `github-token` | GitHub token used to read artifacts and edit labels.                                   | `${{ github.token }}`        |
+| `label`        | Label to add when a review requests changes, and to remove when a review is requested. | `status: waiting for author` |
+
+### How It Works
+
+On `pull_request_review`, the action uploads a small artifact containing the pull request and review IDs if the review requested changes.
+That workflow runs with the pull request's code, so the artifact is treated as untrusted.
+
+On `workflow_run`, the action reads that artifact without unzipping it or writing it to disk, rejecting anything that isn't a tiny JSON record.
+It then only adds the label if GitHub's API confirms that:
+
+- The review exists on that pull request and requested changes
+- The review or the pull request's head is on the commit the recording workflow ran on
+- The pull request is open
+
+On `pull_request_target`, the action removes the label when a review is requested.
+It never checks out or runs code from the pull request.
 
 ## Development
 
