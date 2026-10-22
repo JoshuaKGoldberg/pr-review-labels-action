@@ -68,7 +68,7 @@
 		"prettier-plugin-sentences-per-line": "0.2.4",
 		"prettier-plugin-sh": "0.20.0",
 		"typescript": "5.9.3",
-		"typescript-eslint": "8.71.0",
+		"typescript-eslint": "8.72.0",
 		"vitest": "5.0.1"
 	},
 	"packageManager": "pnpm@12.14.0",
